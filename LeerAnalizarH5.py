@@ -2,6 +2,8 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch
+from scipy.integrate import trapezoid
+from sklearn.metrics import roc_auc_score
 
 # ============================================================
 # 1. CONFIGURACIÓN
@@ -109,14 +111,16 @@ def detect_flashes_in_cycles(
     flash_on_times = []
     flash_off_times = []
 
+    # Evita crear máscaras completas por ciclo (más rápido en señales largas)
     for cycle_idx in cycle_onsets:
         cycle_start_time = t_ds[cycle_idx]
         w_start = cycle_start_time + search_window_start_s
         w_end = cycle_start_time + search_window_end_s
 
-        mask = (t_ds >= w_start) & (t_ds < w_end)
-        window_time = t_ds[mask]
-        window_signal = photodiode_ds[mask]
+        idx_ini = np.searchsorted(t_ds, w_start, side="left")
+        idx_fin = np.searchsorted(t_ds, w_end, side="left")
+        window_time = t_ds[idx_ini:idx_fin]
+        window_signal = photodiode_ds[idx_ini:idx_fin]
 
         if len(window_signal) < 2:
             continue
@@ -464,9 +468,6 @@ plt.show()
 # 9. PSD PARA TODOS LOS CANALES + ENERGÍA ESPECTRAL 1–50 Hz
 # ============================================================
 
-from scipy.integrate import trapezoid
-
-
 # Parámetros banda fisiológica
 FREQ_BAND_MIN = 1
 FREQ_BAND_MAX = 50
@@ -500,30 +501,19 @@ def psd_todos_canales(segmentos, fs, nperseg=2048):
         Shape: (n_reps, n_canales, n_freqs)
     """
 
-    n_reps, n_canales, _ = segmentos.shape
-    psd_reps = []
-    freqs = None
+    n_reps, _, n_samples = segmentos.shape
+    nperseg_eff = min(nperseg, n_samples)
+
+    # Welch vectorizado sobre el último eje: evita bucles por canal/repetición.
+    freqs, psd_reps = welch(
+        segmentos,
+        fs=fs,
+        nperseg=nperseg_eff,
+        axis=-1
+    )  # (n_reps, n_canales, n_freqs)
 
     for rep in range(n_reps):
-        psd_canales = []
-
-        for ch in range(n_canales):
-            signal = segmentos[rep, ch, :]
-
-            f, pxx = welch(
-                signal,
-                fs=fs,
-                nperseg=min(nperseg, signal.shape[0])
-            )
-
-            freqs = f
-            psd_canales.append(pxx)
-
-        psd_reps.append(psd_canales)
-
         print(f"PSD repetición {rep + 1}/{n_reps}", flush=True)
-
-    psd_reps = np.array(psd_reps)  # (n_reps, n_canales, n_freqs)
 
     psd_mean = np.mean(psd_reps, axis=0)
     psd_std = np.std(psd_reps, axis=0)
@@ -984,11 +974,6 @@ for ch in top_off_auc:
 # ============================================================
 # 23. VALIDACIÓN: SHUFFLE, CONTROL BASAL-BASAL Y ROBUSTEZ
 # ============================================================
-
-from sklearn.metrics import roc_auc_score
-import numpy as np
-import matplotlib.pyplot as plt
-
 
 def auc_basal_vs_condicion(basal_vals, condicion_vals):
     y_true = np.concatenate([
